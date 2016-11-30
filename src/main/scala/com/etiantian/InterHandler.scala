@@ -5,6 +5,7 @@ import java.text.SimpleDateFormat
 import java.util
 import java.util.{Date, Properties}
 
+import kafka.serializer.StringDecoder
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hbase.{HBaseConfiguration, TableName}
 import org.apache.hadoop.hbase.client.{HTable, Put}
@@ -13,6 +14,7 @@ import org.apache.hadoop.hbase.mapreduce.TableOutputFormat
 import org.apache.hadoop.mapreduce.Job
 import org.apache.log4j._
 import org.apache.spark.rdd.PairRDDFunctions
+import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.kafka.KafkaUtils
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 import org.apache.spark.{SparkConf, SparkContext}
@@ -49,7 +51,13 @@ object InterHandler {
     val sparkConf = new SparkConf()
     val ssc = new StreamingContext(sparkConf, Seconds(properties.getProperty("streaming.cycle").toInt * 60))
     val map = Map("aixueOnline" -> 1)
-    val kafkaStream = KafkaUtils.createStream(ssc, quorum, "aixueInter", map)
+    val kafkaParams = Map[String, String](
+      "zookeeper.connect" -> quorum, "group.id" -> "InterHandler",
+      "zookeeper.connection.timeout.ms" -> "10000",
+      "auto.offset.reset" -> "largest"
+    )
+
+    val kafkaStream = KafkaUtils.createStream[String, String, StringDecoder, StringDecoder](ssc, kafkaParams, map,StorageLevel.MEMORY_AND_DISK_SER_2)
 
     val format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
 
@@ -119,10 +127,10 @@ object InterHandler {
       /**
         * 写入redis
         */
-      val jedis = new Jedis(properties.getProperty("redis.hostName"), properties.getProperty("redis.port").toInt)
 
       if (!interSumMap.isEmpty && !interAvgMap.isEmpty && !interEveryCount.isEmpty) {
 
+        val jedis = new Jedis(properties.getProperty("redis.hostName"), properties.getProperty("redis.port").toInt)
         val interSumJMap = JavaConversions.mapAsJavaMap[String, String](interSumMap)
         val interAvgJMap = JavaConversions.mapAsJavaMap[String, String](interAvgMap)
         val interEveryJCount = JavaConversions.mapAsJavaMap[String, String](interEveryCount)
@@ -131,6 +139,7 @@ object InterHandler {
         jedis.hmset("aixueInter", interAvgJMap)
         jedis.hmset("aixueInter", interEveryJCount)
         jedis.expire("aixueInter", properties.getProperty("streaming.cycle").toInt * 60 + 2)
+        jedis.close()
 
         val it = interSumJMap.entrySet().iterator()
 
@@ -158,9 +167,7 @@ object InterHandler {
           put.addColumn("aixue".getBytes(), "count".getBytes(), tuple4._4.getBytes())
           (new ImmutableBytesWritable(), put)
         }).saveAsNewAPIHadoopDataset(job.getConfiguration)
-
       }
-      jedis.close()
     })
 
     ssc.start()
